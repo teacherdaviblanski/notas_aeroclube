@@ -235,6 +235,8 @@ textarea{resize:vertical}
     <h1>Diário de Notas</h1>
   </div>
   <div class="spacer"></div>
+  <span id="authInfo" style="color:#B9C6E2;font-size:13px;display:none"></span>
+  <button class="hbtn" id="authBtn" onclick="loginGoogle()">Entrar com Google</button>
   <button class="hbtn" onclick="exportJSON()">Exportar backup</button>
   <button class="hbtn" onclick="document.getElementById('importFile').click()">Importar backup</button>
   <input type="file" id="importFile" accept=".json" style="display:none" onchange="importJSON(this)">
@@ -292,22 +294,139 @@ textarea{resize:vertical}
 <!-- Relatório para impressão/PDF -->
 <div id="report"></div>
 
-<script>
+<script type="module">
 /* =========================================================
-   Armazenamento: usa localStorage quando disponível
-   (GitHub Pages) e memória como reserva (pré-visualização).
+   Firebase — configuração
    ========================================================= */
-const KEY='acl-notas-v1';
-let memStore=null;
-function loadData(){
-  try{const raw=localStorage.getItem(KEY);if(raw)return JSON.parse(raw);}catch(e){}
-  return memStore;
+import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
+import { getAuth, GoogleAuthProvider, signInWithPopup, signOut, onAuthStateChanged }
+  from "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js";
+import { getFirestore, doc, setDoc, getDoc, onSnapshot }
+  from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
+
+const firebaseConfig = {
+  apiKey: "AIzaSyCHApUH5hz3k0g23b_z5na5XWyEdlM8kdg",
+  authDomain: "notasacl.firebaseapp.com",
+  projectId: "notasacl",
+  storageBucket: "notasacl.firebasestorage.app",
+  messagingSenderId: "235221383304",
+  appId: "1:235221383304:web:5dc09ea158aa4a48e3c73d"
+};
+
+const app  = initializeApp(firebaseConfig);
+const auth = getAuth(app);
+const db   = getFirestore(app);
+
+let currentUser = null;
+let unsubSnapshot = null;
+let saveTimer = null;
+
+/* =========================================================
+   Auth
+   ========================================================= */
+async function loginGoogle() {
+  try {
+    await signInWithPopup(auth, new GoogleAuthProvider());
+  } catch(e) { alert("Erro ao entrar: " + e.message); }
 }
-function persist(){
-  try{localStorage.setItem(KEY,JSON.stringify(DB));}catch(e){memStore=DB;}
+async function logout() {
+  if (!confirm("Sair da conta Google?")) return;
+  if (unsubSnapshot) { unsubSnapshot(); unsubSnapshot = null; }
+  await signOut(auth);
 }
 
-/* ---------- Dados iniciais (da sua planilha) ---------- */
+onAuthStateChanged(auth, async user => {
+  currentUser = user;
+  updateAuthUI();
+  if (user) {
+    await loadFromCloud();
+    listenCloud();
+  } else {
+    if (unsubSnapshot) { unsubSnapshot(); unsubSnapshot = null; }
+    // carrega local se não estiver logado
+    DB = migrate(loadLocal() || seed());
+    persist();
+    render();
+  }
+});
+
+function updateAuthUI() {
+  const btn = document.getElementById("authBtn");
+  const info = document.getElementById("authInfo");
+  if (!btn) return;
+  if (currentUser) {
+    btn.textContent = "Sair";
+    btn.onclick = logout;
+    info.textContent = currentUser.displayName || currentUser.email;
+    info.style.display = "inline";
+  } else {
+    btn.textContent = "Entrar com Google";
+    btn.onclick = loginGoogle;
+    info.textContent = "";
+    info.style.display = "none";
+  }
+}
+
+/* =========================================================
+   Firestore — salvar / carregar / escutar
+   ========================================================= */
+function docRef() {
+  return doc(db, "usuarios", currentUser.uid, "dados", "notasacl");
+}
+
+async function loadFromCloud() {
+  try {
+    const snap = await getDoc(docRef());
+    if (snap.exists()) {
+      DB = migrate(snap.data().db);
+    } else {
+      DB = migrate(loadLocal() || seed());
+      await saveToCloud(); // sobe dados locais pela 1ª vez
+    }
+    persist();
+    render();
+  } catch(e) { console.error("Erro ao carregar:", e); }
+}
+
+async function saveToCloud() {
+  if (!currentUser) return;
+  try {
+    await setDoc(docRef(), { db: DB, updatedAt: Date.now() });
+  } catch(e) { console.error("Erro ao salvar:", e); }
+}
+
+function listenCloud() {
+  if (unsubSnapshot) unsubSnapshot();
+  unsubSnapshot = onSnapshot(docRef(), snap => {
+    if (snap.exists() && snap.metadata.hasPendingWrites === false) {
+      const remote = migrate(snap.data().db);
+      DB = remote;
+      persist();
+      render();
+    }
+  });
+}
+
+/* =========================================================
+   Armazenamento local (fallback sem login)
+   ========================================================= */
+const KEY = "acl-notas-v2";
+function loadLocal() {
+  try { const r=localStorage.getItem(KEY); return r?JSON.parse(r):null; } catch(e){return null;}
+}
+function persist() {
+  try { localStorage.setItem(KEY, JSON.stringify(DB)); } catch(e){}
+}
+function scheduleSave() {
+  persist();
+  if (!currentUser) return;
+  clearTimeout(saveTimer);
+  saveTimer = setTimeout(saveToCloud, 1500);
+}
+
+/* =========================================================
+   Dados iniciais
+   ========================================================= */
 function seed(){
   const alunos=['Ana Julia Cardoso','Beatriz','Daniele Marques','Gyovanna','Helena Vitória','Jean','Jéssica Fiorini','Julia Diniz','Julia Vitória','Larissa Costa','Maria Clara','Priscila Alves','Sirlei Gomes']
     .map(n=>({id:uid(),nome:n}));
@@ -323,8 +442,8 @@ function seed(){
     alunos,materias:[met,nav,cga],notas
   }]};
 }
-
 function migrate(db){
+  if(!db)return seed();
   (db.turmas||[]).forEach(t=>{
     t.notas=t.notas||{};
     Object.keys(t.notas).forEach(mid=>{
@@ -336,24 +455,20 @@ function migrate(db){
   });
   return db;
 }
-let DB=migrate(loadData()||seed());
-persist();
 
-/* ---------- Estado da interface ---------- */
-let curTurma=DB.turmas[0]?DB.turmas[0].id:null;
-let curTab='notas';
-let curMat=null;
+/* =========================================================
+   Estado global
+   ========================================================= */
+let DB;
+let curTurma=null, curTab='notas', curMat=null;
 let editingTurma=null, editingMat=null;
 
 function uid(){return Math.random().toString(36).slice(2,10)+Date.now().toString(36);}
 function esc(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');}
-function turma(){return DB.turmas.find(t=>t.id===curTurma);}
-function sortAlunos(t){return [...t.alunos].sort((a,b)=>a.nome.localeCompare(b.nome,'pt-BR',{sensitivity:'base'}));}
+function turma(){return DB&&DB.turmas.find(t=>t.id===curTurma);}
+function sortAlunos(t){return[...t.alunos].sort((a,b)=>a.nome.localeCompare(b.nome,'pt-BR',{sensitivity:'base'}));}
+function getNotas(t,mat,alunoId){const o=t.notas[mat.id]&&t.notas[mat.id][alunoId];return o||{p:[],rec:null};}
 
-function getNotas(t,mat,alunoId){
-  const o=t.notas[mat.id]&&t.notas[mat.id][alunoId];
-  return o||{p:[],rec:null};
-}
 function mediaAluno(t,mat,alunoId){
   const o=getNotas(t,mat,alunoId);
   const p=Array.from({length:mat.provas},(_,i)=>o.p?o.p[i]:undefined);
@@ -362,12 +477,11 @@ function mediaAluno(t,mat,alunoId){
   if(!vals.length)return{media:null,completa:false,rec,usouRec:false};
   const completa=vals.length===mat.provas;
   let usadas=[...vals],usouRec=false;
-  if(completa&&rec!==null){
-    // A REC substitui a nota mais baixa apenas se melhorar a média
-    const idxMin=usadas.indexOf(Math.min(...usadas));
-    if(rec>usadas[idxMin]){
-      usadas[idxMin]=rec;
-      usouRec=true;
+  if(completa){
+    if(mat.provas===1){
+      if(rec!==null&&rec>usadas[0]){usadas[0]=rec;usouRec=true;}
+    }else{
+      if(rec!==null){const idxMin=usadas.indexOf(Math.min(...usadas));if(rec>usadas[idxMin]){usadas[idxMin]=rec;usouRec=true;}}
     }
   }
   const parcial=usadas.reduce((s,v)=>s+v,0)/usadas.length;
@@ -376,33 +490,27 @@ function mediaAluno(t,mat,alunoId){
 function fmt(n){return n===null||n===undefined?'—':(Math.round(n*10)/10).toLocaleString('pt-BR');}
 
 /* =========================================================
-   Renderização
+   Render
    ========================================================= */
 function render(){
+  if(!DB)return;
+  if(!curTurma&&DB.turmas[0])curTurma=DB.turmas[0].id;
   renderSidebar();
   const t=turma();
   const main=document.getElementById('main');
-  if(!t){
-    main.innerHTML='<div class="empty"><h3>Nenhuma turma cadastrada</h3><p>Crie a primeira turma no botão "+ Nova turma" ao lado.</p></div>';
-    return;
-  }
+  if(!t){main.innerHTML='<div class="empty"><h3>Nenhuma turma cadastrada</h3><p>Crie a primeira turma no botão "+ Nova turma".</p></div>';return;}
   if(!t.materias.find(m=>m.id===curMat))curMat=t.materias[0]?t.materias[0].id:null;
-  let html=`
-  <div class="turma-head">
-    <div>
-      <h2>${esc(t.nome)}</h2>
-      <div class="sub">${t.alunos.length} aluno(s) · ${t.materias.length} matéria(s) · média mínima ${t.minima}</div>
-    </div>
+  let html=`<div class="turma-head">
+    <div><h2>${esc(t.nome)}</h2><div class="sub">${t.alunos.length} aluno(s) · ${t.materias.length} matéria(s) · mínima ${t.minima}</div></div>
     <div class="actions">
-      <button class="btn ghost sm" onclick="openTurmaModal('${t.id}')">Editar turma</button>
+      <button class="btn ghost sm" onclick="openTurmaModal('${t.id}')">Editar</button>
       <button class="btn danger-ghost sm" onclick="delTurma('${t.id}')">Excluir</button>
-    </div>
-  </div>
+    </div></div>
   <div class="tabs">
     <button class="tab ${curTab==='notas'?'active':''}" onclick="setTab('notas')">Lançar notas</button>
     <button class="tab ${curTab==='alunos'?'active':''}" onclick="setTab('alunos')">Alunos</button>
     <button class="tab ${curTab==='materias'?'active':''}" onclick="setTab('materias')">Matérias</button>
-    <button class="tab ${curTab==='relatorio'?'active':''}" onclick="setTab('relatorio')">Relatório final</button>
+    <button class="tab ${curTab==='relatorio'?'active':''}" onclick="setTab('relatorio')">Relatório</button>
   </div>`;
   if(curTab==='notas')html+=viewNotas(t);
   if(curTab==='alunos')html+=viewAlunos(t);
@@ -412,167 +520,103 @@ function render(){
 }
 
 function renderSidebar(){
-  const el=document.getElementById('turmaList');
-  el.innerHTML=DB.turmas.map(t=>`
+  document.getElementById('turmaList').innerHTML=DB.turmas.map(t=>`
     <button class="turma-item ${t.id===curTurma?'active':''}" onclick="selTurma('${t.id}')">
-      <strong>${esc(t.nome)}</strong>
-      <small>${t.alunos.length} aluno(s) · ${t.materias.length} matéria(s)</small>
+      <strong>${esc(t.nome)}</strong><small>${t.alunos.length} aluno(s) · ${t.materias.length} matéria(s)</small>
     </button>`).join('');
 }
 
-/* ---------- Aba: Lançar notas ---------- */
 function viewNotas(t){
-  if(!t.materias.length)return '<div class="empty"><h3>Sem matérias</h3><p>Cadastre matérias na aba "Matérias" para lançar notas.</p></div>';
-  if(!t.alunos.length)return '<div class="empty"><h3>Sem alunos</h3><p>Cadastre os alunos na aba "Alunos" para lançar notas.</p></div>';
+  if(!t.materias.length)return'<div class="empty"><h3>Sem matérias</h3><p>Cadastre em "Matérias".</p></div>';
+  if(!t.alunos.length)return'<div class="empty"><h3>Sem alunos</h3><p>Cadastre em "Alunos".</p></div>';
   const mat=t.materias.find(m=>m.id===curMat)||t.materias[0];
-  let html='<div class="pills">'+t.materias.map(m=>
-    `<button class="pill ${m.id===mat.id?'active':''}" onclick="selMat('${m.id}')">${esc(m.nome)}</button>`).join('')+'</div>';
+  let html='<div class="pills">'+t.materias.map(m=>`<button class="pill ${m.id===mat.id?'active':''}" onclick="selMat('${m.id}')">${esc(m.nome)}</button>`).join('')+'</div>';
   const cols=Array.from({length:mat.provas},(_,i)=>`<th>P${i+1}</th>`).join('');
   html+=`<div class="card"><div class="table-wrap"><table class="grade">
-    <thead><tr><th>Aluno</th>${cols}<th class="rec-th">REC</th><th>Média</th><th>Situação</th></tr></thead><tbody>`;
+    <thead><tr><th>Aluno</th>${cols}<th class="rec-th">REC</th><th>Média final</th><th>Situação</th></tr></thead><tbody>`;
   sortAlunos(t).forEach(a=>{
     const o=getNotas(t,mat,a.id);
     let cells='';
     for(let i=0;i<mat.provas;i++){
       const v=(o.p&&o.p[i]!==null&&o.p[i]!==undefined)?o.p[i]:'';
-      cells+=`<td><input class="nota-input" type="number" min="0" max="100" step="0.5" value="${v}"
-        onchange="setNota('${mat.id}','${a.id}',${i},this.value)" aria-label="P${i+1} de ${esc(a.nome)}"></td>`;
+      cells+=`<td><input class="nota-input" type="number" min="0" max="100" step="0.5" value="${v}" onchange="setNota('${mat.id}','${a.id}',${i},this.value)"></td>`;
     }
     const recV=(o.rec===null||o.rec===undefined)?'':o.rec;
-    cells+=`<td><input class="nota-input rec" type="number" min="0" max="100" step="0.5" value="${recV}"
-      onchange="setNota('${mat.id}','${a.id}','rec',this.value)" aria-label="Recuperação de ${esc(a.nome)}"></td>`;
+    cells+=`<td><input class="nota-input rec" type="number" min="0" max="100" step="0.5" value="${recV}" onchange="setNota('${mat.id}','${a.id}','rec',this.value)"></td>`;
     const r=mediaAluno(t,mat,a.id);
-    let badge='<span class="badge pend">Pendente</span>', mediaTxt='—';
-    if(r.completa){
-      mediaTxt=fmt(r.media)+(r.usouRec?' <span style="font-size:11px;color:var(--red);font-weight:700">rec</span>':'');
-      badge=r.media>=t.minima?'<span class="badge ok">Aprovado</span>':'<span class="badge rep">Reprovado</span>';
-    }else if(r.parcial!==undefined&&r.parcial!==null){
-      mediaTxt=fmt(r.parcial)+' <span style="font-size:11px;color:var(--muted)">(parcial)</span>';
-    }
+    let badge='<span class="badge pend">Pendente</span>',mediaTxt='—';
+    if(r.completa){mediaTxt=fmt(r.media)+(r.usouRec?' <span style="font-size:11px;color:var(--red);font-weight:700">rec</span>':'');badge=r.media>=t.minima?'<span class="badge ok">Aprovado</span>':'<span class="badge rep">Reprovado</span>';}
+    else if(r.parcial!=null&&o.p&&o.p.some(v=>v!==null&&v!==undefined&&v!==''))mediaTxt=fmt(r.parcial)+' <span style="font-size:11px;color:var(--muted)">(parcial)</span>';
     html+=`<tr><td>${esc(a.nome)}</td>${cells}<td class="media-cell">${mediaTxt}</td><td>${badge}</td></tr>`;
   });
-  html+='</tbody></table></div></div><p class="hint">Notas de 0 a 100. A média fecha quando todas as provas da matéria estiverem lançadas. Se houver nota de recuperação (REC), ela substitui a nota mais baixa das provas no cálculo da média — somente se for maior que ela. Média mínima para aprovação: '+t.minima+'.</p>';
+  const regra=mat.provas===1?'1 prova: média = maior nota entre P1 e REC.':'REC substitui a mais baixa, somente se melhorar.';
+  html+=`</tbody></table></div></div><p class="hint">Mínima: ${t.minima}. ${regra}</p>`;
   return html;
 }
 
-/* ---------- Aba: Alunos ---------- */
 function viewAlunos(t){
-  let html=`<div class="card"><div class="card-pad">
-    <div class="add-row">
-      <textarea id="novoAluno" rows="2" placeholder="Nome do aluno (ou vários, um por linha)"></textarea>
-      <button class="btn navy" onclick="addAlunos()">Adicionar</button>
-    </div>`;
-  if(!t.alunos.length){html+='<p class="hint">Nenhum aluno cadastrado. A lista é organizada em ordem alfabética automaticamente.</p>';}
-  sortAlunos(t).forEach(a=>{
-    html+=`<div class="aluno-row">
-      <span class="nome">${esc(a.nome)}</span>
-      <button class="icon-btn" title="Renomear" onclick="renameAluno('${a.id}')">✎</button>
-      <button class="icon-btn" title="Remover" onclick="delAluno('${a.id}')">✕</button>
-    </div>`;
-  });
-  html+='</div></div><p class="hint">Ao remover um aluno, as notas dele são apagadas em todas as matérias desta turma.</p>';
-  return html;
+  let html=`<div class="card"><div class="card-pad"><div class="add-row">
+    <textarea id="novoAluno" rows="2" placeholder="Nome(s), um por linha"></textarea>
+    <button class="btn navy" onclick="addAlunos()">Adicionar</button></div>`;
+  sortAlunos(t).forEach(a=>{html+=`<div class="aluno-row"><span class="nome">${esc(a.nome)}</span>
+    <button class="icon-btn" onclick="renameAluno('${a.id}')">✎</button>
+    <button class="icon-btn" onclick="delAluno('${a.id}')">✕</button></div>`;});
+  return html+'</div></div>';
 }
 
-/* ---------- Aba: Matérias ---------- */
 function viewMaterias(t){
-  let html=`<div class="card"><div class="card-pad">
-    <div class="add-row"><button class="btn navy" onclick="openMatModal()">+ Nova matéria</button></div>`;
-  if(!t.materias.length)html+='<p class="hint">Nenhuma matéria cadastrada.</p>';
+  let html=`<div class="card"><div class="card-pad"><div class="add-row"><button class="btn navy" onclick="openMatModal()">+ Nova matéria</button></div>`;
   t.materias.forEach(m=>{
-    html+=`<div class="materia-row">
-      <span class="nome">${esc(m.nome)}</span>
-      <span class="provas">${m.provas} prova(s) · média das ${m.provas}</span>
-      <button class="icon-btn" title="Editar" onclick="openMatModal('${m.id}')">✎</button>
-      <button class="icon-btn" title="Remover" onclick="delMateria('${m.id}')">✕</button>
-    </div>`;
+    const regra=m.provas===1?'média = maior (P1 ou REC)':'média das '+m.provas+' provas (REC substitui a mais baixa)';
+    html+=`<div class="materia-row"><span class="nome">${esc(m.nome)}</span><span class="provas">${m.provas} prova(s) · ${regra}</span>
+      <button class="icon-btn" onclick="openMatModal('${m.id}')">✎</button>
+      <button class="icon-btn" onclick="delMateria('${m.id}')">✕</button></div>`;
   });
-  html+='</div></div>';
-  return html;
+  return html+'</div></div>';
 }
 
-/* ---------- Aba: Relatório ---------- */
 function viewRelatorio(t){
   let html=`<div class="card"><div class="card-pad">
-    <p style="margin-bottom:12px">O relatório reúne, por matéria, todas as provas e a média de cada aluno, além do quadro final consolidado. Ao clicar no botão, use a opção <strong>"Salvar como PDF"</strong> na janela de impressão do navegador.</p>
-    <button class="btn red" onclick="gerarPDF()">Gerar relatório em PDF</button>
-  </div></div>
-  <h3 style="font-family:'Barlow Condensed';text-transform:uppercase;color:var(--navy);margin:22px 0 10px;font-size:19px">Prévia — quadro final consolidado</h3>
+    <p style="margin-bottom:12px">Use <strong>"Salvar como PDF"</strong> na janela de impressão.</p>
+    <button class="btn red" onclick="gerarPDF()">Gerar PDF</button></div></div>
+  <h3 style="font-family:'Barlow Condensed';text-transform:uppercase;color:var(--navy);margin:22px 0 10px;font-size:19px">Prévia — quadro final</h3>
   <div class="card"><div class="table-wrap"><table class="grade">
-    <thead><tr><th>Aluno</th>${t.materias.map(m=>`<th>${esc(m.nome)}</th>`).join('')}<th>Situação geral</th></tr></thead><tbody>`;
+    <thead><tr><th>Aluno</th>${t.materias.map(m=>`<th>${esc(m.nome)}</th>`).join('')}<th>Situação</th></tr></thead><tbody>`;
   sortAlunos(t).forEach(a=>{
-    let allOk=true,allDone=t.materias.length>0;
-    let row=`<td>${esc(a.nome)}</td>`;
-    t.materias.forEach(m=>{
-      const r=mediaAluno(t,m,a.id);
-      if(!r.completa){allDone=false;row+='<td>—</td>';}
-      else{if(r.media<t.minima)allOk=false;row+=`<td class="media-cell">${fmt(r.media)}</td>`;}
-    });
-    let badge='<span class="badge pend">Em curso</span>';
-    if(allDone)badge=allOk?'<span class="badge ok">Aprovado</span>':'<span class="badge rep">Reprovado</span>';
-    html+=`<tr>${row}<td>${badge}</td></tr>`;
+    let allOk=true,allDone=t.materias.length>0,row=`<td>${esc(a.nome)}</td>`;
+    t.materias.forEach(m=>{const r=mediaAluno(t,m,a.id);if(!r.completa){allDone=false;row+='<td>—</td>';}else{if(r.media<t.minima)allOk=false;row+=`<td class="media-cell">${fmt(r.media)}</td>`;}});
+    html+=`<tr>${row}<td>${allDone?(allOk?'<span class="badge ok">Aprovado</span>':'<span class="badge rep">Reprovado</span>'):'<span class="badge pend">Em curso</span>'}</td></tr>`;
   });
-  html+='</tbody></table></div></div>';
-  return html;
+  return html+'</tbody></table></div></div>';
 }
 
-/* =========================================================
-   Relatório PDF (via impressão do navegador)
-   ========================================================= */
 function gerarPDF(){
   const t=turma();if(!t)return;
   const logo=document.getElementById('logoImg').src;
   const hoje=new Date().toLocaleDateString('pt-BR');
-  let html=`
-  <div class="rep-head">
-    <img src="${logo}" alt="">
-    <div>
-      <h1>Aeroclube de Londrina — Escola de Aviação Civil</h1>
-      <p>Relatório final de notas · ${esc(t.nome)} · Emitido em ${hoje}</p>
-    </div>
-  </div>
-  <div class="rep-strip"></div>`;
+  let html=`<div class="rep-head"><img src="${logo}" alt=""><div><h1>Aeroclube de Londrina — Escola de Aviação Civil</h1><p>Relatório final · ${esc(t.nome)} · ${hoje}</p></div></div><div class="rep-strip"></div>`;
   t.materias.forEach(m=>{
-    const cols=Array.from({length:m.provas},(_,i)=>`<th>P${i+1}</th>`).join('');
-    html+=`<h2>${esc(m.nome)} — ${m.provas} prova(s)</h2>
-    <table><thead><tr><th>Aluno</th>${cols}<th>REC</th><th>Média</th><th>Situação</th></tr></thead><tbody>`;
+    html+=`<h2>${esc(m.nome)}</h2><table><thead><tr><th>Aluno</th>${Array.from({length:m.provas},(_,i)=>`<th>P${i+1}</th>`).join('')}<th>REC</th><th>Média</th><th>Situação</th></tr></thead><tbody>`;
     sortAlunos(t).forEach(a=>{
-      const o=getNotas(t,m,a.id);
-      let cells='';
-      for(let i=0;i<m.provas;i++){
-        const v=o.p?o.p[i]:null;cells+=`<td>${v===null||v===undefined||v===''?'—':fmt(Number(v))}</td>`;
-      }
-      const r=mediaAluno(t,m,a.id);
-      cells+=`<td>${r.rec===null?'—':fmt(r.rec)}</td>`;
-      const sit=r.completa?(r.media>=t.minima?'Aprovado':'Reprovado'):'Pendente';
-      html+=`<tr><td>${esc(a.nome)}</td>${cells}<td class="final-strong">${r.completa?fmt(r.media):'—'}${r.usouRec?'*':''}</td><td>${sit}</td></tr>`;
-    });
-    html+='</tbody></table>';
+      const o=getNotas(t,m,a.id);let cells='';
+      for(let i=0;i<m.provas;i++){const v=o.p?o.p[i]:null;cells+=`<td>${v===null||v===undefined||v===''?'—':fmt(Number(v))}</td>`;}
+      const r=mediaAluno(t,m,a.id);cells+=`<td>${r.rec===null?'—':fmt(r.rec)}</td>`;
+      html+=`<tr><td>${esc(a.nome)}</td>${cells}<td class="final-strong">${r.completa?fmt(r.media):'—'}${r.usouRec?'*':''}</td><td>${r.completa?(r.media>=t.minima?'Aprovado':'Reprovado'):'Pendente'}</td></tr>`;
+    });html+='</tbody></table>';
   });
-  html+=`<h2>Quadro final consolidado</h2>
-  <table><thead><tr><th>Aluno</th>${t.materias.map(m=>`<th>${esc(m.nome)}</th>`).join('')}<th>Situação geral</th></tr></thead><tbody>`;
+  html+=`<h2>Quadro final</h2><table><thead><tr><th>Aluno</th>${t.materias.map(m=>`<th>${esc(m.nome)}</th>`).join('')}<th>Situação</th></tr></thead><tbody>`;
   sortAlunos(t).forEach(a=>{
     let allOk=true,allDone=t.materias.length>0,row=`<td>${esc(a.nome)}</td>`;
-    t.materias.forEach(m=>{
-      const r=mediaAluno(t,m,a.id);
-      if(!r.completa){allDone=false;row+='<td>—</td>';}
-      else{if(r.media<t.minima)allOk=false;row+=`<td class="final-strong">${fmt(r.media)}</td>`;}
-    });
-    const sit=allDone?(allOk?'Aprovado':'Reprovado'):'Em curso';
-    html+=`<tr>${row}<td>${sit}</td></tr>`;
+    t.materias.forEach(m=>{const r=mediaAluno(t,m,a.id);if(!r.completa){allDone=false;row+='<td>—</td>';}else{if(r.media<t.minima)allOk=false;row+=`<td class="final-strong">${fmt(r.media)}</td>`;}});
+    html+=`<tr>${row}<td>${allDone?(allOk?'Aprovado':'Reprovado'):'Em curso'}</td></tr>`;
   });
-  html+=`</tbody></table>
-  <p style="font-size:12px;margin-top:10px;color:#444">Nota mínima para aprovação: ${t.minima}. Média final por matéria: média aritmética das provas. * Quando há nota de recuperação (REC) maior que a menor nota de prova, ela a substitui no cálculo da média.</p>
-  <div class="rep-foot">
-    <span>Aeroclube de Londrina · Escola de Aviação Civil</span>
-    <div class="assin">Instrutor responsável</div>
-  </div>`;
+  html+=`</tbody></table><p style="font-size:12px;margin-top:10px;color:#444">Mínima: ${t.minima}. * REC usada. 1 prova: média = maior (P1 ou REC). 2+ provas: REC substitui a mais baixa.</p><div class="rep-foot"><span>Aeroclube de Londrina</span><div class="assin">Instrutor responsável</div></div>`;
   document.getElementById('report').innerHTML=html;
   setTimeout(()=>window.print(),100);
 }
 
 /* =========================================================
-   Ações
+   Ações globais (expostas via window para onclick no HTML)
    ========================================================= */
 function setTab(t){curTab=t;render();}
 function selTurma(id){curTurma=id;curMat=null;render();}
@@ -587,33 +631,24 @@ function setNota(matId,alunoId,idx,val){
   let v=val===''?null:Math.max(0,Math.min(100,Number(val)));
   if(v!==null&&isNaN(v))v=null;
   if(idx==='rec')o.rec=v;else o.p[idx]=v;
-  persist();render();
+  scheduleSave();render();
 }
 
-/* --- Turmas --- */
 function openTurmaModal(id){
   editingTurma=id||null;
   document.getElementById('turmaModalTitle').textContent=id?'Editar turma':'Nova turma';
   document.getElementById('tModeloWrap').style.display=id?'none':'block';
-  if(id){
-    const t=DB.turmas.find(x=>x.id===id);
-    document.getElementById('tNome').value=t.nome;
-    document.getElementById('tMinima').value=t.minima;
-  }else{
-    document.getElementById('tNome').value='';
-    document.getElementById('tMinima').value='70';
-  }
+  if(id){const t=DB.turmas.find(x=>x.id===id);document.getElementById('tNome').value=t.nome;document.getElementById('tMinima').value=t.minima;}
+  else{document.getElementById('tNome').value='';document.getElementById('tMinima').value='70';}
   document.getElementById('turmaOverlay').classList.add('open');
   document.getElementById('tNome').focus();
 }
 function saveTurma(){
   const nome=document.getElementById('tNome').value.trim();
   const minima=Number(document.getElementById('tMinima').value)||70;
-  if(!nome){alert('Informe o nome da turma.');return;}
-  if(editingTurma){
-    const t=DB.turmas.find(x=>x.id===editingTurma);
-    t.nome=nome;t.minima=minima;
-  }else{
+  if(!nome){alert('Informe o nome.');return;}
+  if(editingTurma){const t=DB.turmas.find(x=>x.id===editingTurma);t.nome=nome;t.minima=minima;}
+  else{
     const modelo=document.getElementById('tModelo').value;
     let materias=[];
     if(modelo==='pp')materias=[{id:uid(),nome:'Teoria de Voo — Piloto Privado',provas:3}];
@@ -622,28 +657,21 @@ function saveTurma(){
     const nt={id:uid(),nome,minima,alunos:[],materias,notas:{}};
     DB.turmas.push(nt);curTurma=nt.id;curMat=null;curTab='alunos';
   }
-  persist();closeModal('turmaOverlay');render();
+  scheduleSave();closeModal('turmaOverlay');render();
 }
 function delTurma(id){
   const t=DB.turmas.find(x=>x.id===id);
-  if(!confirm(`Excluir a turma "${t.nome}" e todas as suas notas? Esta ação não pode ser desfeita.`))return;
+  if(!confirm(`Excluir "${t.nome}"?`))return;
   DB.turmas=DB.turmas.filter(x=>x.id!==id);
   curTurma=DB.turmas[0]?DB.turmas[0].id:null;curMat=null;
-  persist();render();
+  scheduleSave();render();
 }
 
-/* --- Matérias --- */
 function openMatModal(id){
   editingMat=id||null;
   document.getElementById('matModalTitle').textContent=id?'Editar matéria':'Nova matéria';
-  if(id){
-    const m=turma().materias.find(x=>x.id===id);
-    document.getElementById('mNome').value=m.nome;
-    document.getElementById('mProvas').value=m.provas;
-  }else{
-    document.getElementById('mNome').value='';
-    document.getElementById('mProvas').value='2';
-  }
+  if(id){const m=turma().materias.find(x=>x.id===id);document.getElementById('mNome').value=m.nome;document.getElementById('mProvas').value=m.provas;}
+  else{document.getElementById('mNome').value='';document.getElementById('mProvas').value='2';}
   document.getElementById('matOverlay').classList.add('open');
   document.getElementById('mNome').focus();
 }
@@ -651,83 +679,71 @@ function saveMateria(){
   const t=turma();
   const nome=document.getElementById('mNome').value.trim();
   const provas=Math.max(1,Math.min(10,Number(document.getElementById('mProvas').value)||1));
-  if(!nome){alert('Informe o nome da matéria.');return;}
+  if(!nome){alert('Informe o nome.');return;}
   if(editingMat){
-    const m=t.materias.find(x=>x.id===editingMat);
-    m.nome=nome;
+    const m=t.materias.find(x=>x.id===editingMat);m.nome=nome;
     if(provas!==m.provas&&t.notas[m.id]){
-      Object.keys(t.notas[m.id]).forEach(aid=>{
-        const o=t.notas[m.id][aid]||{p:[],rec:null};
-        const arr=o.p||[];
-        t.notas[m.id][aid]={p:Array.from({length:provas},(_,i)=>arr[i]??null),rec:o.rec??null};
-      });
+      Object.keys(t.notas[m.id]).forEach(aid=>{const o=t.notas[m.id][aid]||{p:[],rec:null};const arr=o.p||[];t.notas[m.id][aid]={p:Array.from({length:provas},(_,i)=>arr[i]??null),rec:o.rec??null};});
     }
     m.provas=provas;
-  }else{
-    const m={id:uid(),nome,provas};
-    t.materias.push(m);curMat=m.id;
-  }
-  persist();closeModal('matOverlay');render();
+  }else{const m={id:uid(),nome,provas};t.materias.push(m);curMat=m.id;}
+  scheduleSave();closeModal('matOverlay');render();
 }
 function delMateria(id){
   const t=turma();const m=t.materias.find(x=>x.id===id);
-  if(!confirm(`Remover a matéria "${m.nome}" e todas as notas lançadas nela?`))return;
-  t.materias=t.materias.filter(x=>x.id!==id);
-  delete t.notas[id];
+  if(!confirm(`Remover "${m.nome}"?`))return;
+  t.materias=t.materias.filter(x=>x.id!==id);delete t.notas[id];
   if(curMat===id)curMat=null;
-  persist();render();
+  scheduleSave();render();
 }
 
-/* --- Alunos --- */
 function addAlunos(){
   const t=turma();
-  const raw=document.getElementById('novoAluno').value;
-  const nomes=raw.split('\n').map(s=>s.trim()).filter(Boolean);
+  const nomes=document.getElementById('novoAluno').value.split('\n').map(s=>s.trim()).filter(Boolean);
   if(!nomes.length)return;
   nomes.forEach(n=>t.alunos.push({id:uid(),nome:n}));
-  persist();render();
+  scheduleSave();render();
 }
 function renameAluno(id){
   const t=turma();const a=t.alunos.find(x=>x.id===id);
-  const novo=prompt('Novo nome do aluno:',a.nome);
-  if(novo&&novo.trim()){a.nome=novo.trim();persist();render();}
+  const novo=prompt('Novo nome:',a.nome);
+  if(novo&&novo.trim()){a.nome=novo.trim();scheduleSave();render();}
 }
 function delAluno(id){
   const t=turma();const a=t.alunos.find(x=>x.id===id);
-  if(!confirm(`Remover ${a.nome} e apagar as notas dele(a) nesta turma?`))return;
+  if(!confirm(`Remover ${a.nome}?`))return;
   t.alunos=t.alunos.filter(x=>x.id!==id);
-  Object.values(t.notas).forEach(porAluno=>{delete porAluno[id];});
-  persist();render();
+  Object.values(t.notas).forEach(p=>{delete p[id];});
+  scheduleSave();render();
 }
 
-/* --- Backup --- */
 function exportJSON(){
   const blob=new Blob([JSON.stringify(DB,null,2)],{type:'application/json'});
-  const a=document.createElement('a');
-  a.href=URL.createObjectURL(blob);
-  a.download='backup-notas-aeroclube-'+new Date().toISOString().slice(0,10)+'.json';
-  a.click();
+  const a=document.createElement('a');a.href=URL.createObjectURL(blob);
+  a.download='backup-notas-'+new Date().toISOString().slice(0,10)+'.json';a.click();
 }
 function importJSON(input){
   const f=input.files[0];if(!f)return;
   const r=new FileReader();
   r.onload=()=>{
-    try{
-      const data=JSON.parse(r.result);
-      if(!data.turmas)throw new Error();
-      if(!confirm('Importar este backup vai substituir todos os dados atuais. Continuar?'))return;
-      DB=data;curTurma=DB.turmas[0]?DB.turmas[0].id:null;curMat=null;
-      persist();render();
-    }catch(e){alert('Arquivo inválido. Selecione um backup exportado por este sistema.');}
-    input.value='';
-  };
-  r.readAsText(f);
+    try{const data=JSON.parse(r.result);if(!data.turmas)throw new Error();
+      if(!confirm('Substituir todos os dados?'))return;
+      DB=migrate(data);curTurma=DB.turmas[0]?DB.turmas[0].id:null;curMat=null;
+      scheduleSave();render();
+    }catch(e){alert('Arquivo inválido.');}input.value='';
+  };r.readAsText(f);
 }
 
 function closeModal(id){document.getElementById(id).classList.remove('open');}
 document.querySelectorAll('.overlay').forEach(o=>o.addEventListener('click',e=>{if(e.target===o)o.classList.remove('open');}));
 
-render();
+// Expor funções para onclick no HTML
+Object.assign(window,{setTab,selTurma,selMat,setNota,openTurmaModal,saveTurma,delTurma,
+  openMatModal,saveMateria,delMateria,addAlunos,renameAluno,delAluno,exportJSON,importJSON,
+  closeModal,gerarPDF,loginGoogle,logout});
+
+// Inicializar (auth listener já faz isso)
 </script>
+
 </body>
 </html>
